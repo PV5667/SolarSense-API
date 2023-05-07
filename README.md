@@ -1,1 +1,0 @@
-# SolarSense-API
