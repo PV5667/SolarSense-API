@@ -10,7 +10,6 @@ CORS(app)
 @app.route('/', methods=["GET", "POST"])
 @app.route('/detect', methods=["GET", "POST"])
 def detect():
-    print("this is run")
     if request.method == "POST":
         jsonData = json.loads(request.get_data().decode())
         out = main(jsonData)
