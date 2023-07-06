@@ -17,12 +17,15 @@ from shapely.geometry import Polygon
 import geojson
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import warnings
 
-MAPBOX_ACCESS_TOKEN = ''
+warnings.filterwarnings('ignore')
+
+MAPBOX_ACCESS_TOKEN = 'pk.eyJ1IjoicHY1NjY3IiwiYSI6ImNsZGFtOHVoejBiZ2Mzb3A2djgyaDl1OGEifQ.FSssERk7wLiG1fDpen0iXA'
 
 IMG_HEIGHT = 400
 IMG_WIDTH =  400
-mps_device = torch.device("mps")
+mps_device = "cpu" #torch.device("mps")
 
 PATCH_SIZE = 400
 
@@ -38,6 +41,7 @@ def call_api(bbox):
         path = "analysis.png"
         with open(path, 'wb') as f:
             f.write(response.content)
+            print("Mapbox API called")
         return True
     else:
         print(f"Error occured code {response.status_code}")
@@ -57,7 +61,8 @@ def load_classification_model(model_path):
 def load_classification_model(model_path):
     #model = torchvision.models.efficientnet_b3(weights="EfficientNet_B3_Weights.IMAGENET1K_V1")
     #model.classifier = nn.Sequential(nn.Linear(1536, 256), nn.ReLU(), nn.Dropout(0.3), nn.Linear(256, 2))
-    model = torchvision.models.inception_v3(weights="IMAGENET1K_V1")
+    print("classification model loading")
+    model = torchvision.models.inception_v3(weights=None)
     model.fc = nn.Linear(2048, 2)
     model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
     model.eval()
@@ -65,6 +70,7 @@ def load_classification_model(model_path):
     return model
 
 def load_segmentation_model(model_path):
+    print("segmentation model loading")
     num_classes = 1
     model = deeplabv3_resnet50(weights="DeepLabV3_ResNet50_Weights.DEFAULT")
     model.classifier = DeepLabHead(2048, num_classes)
@@ -116,7 +122,7 @@ def split_into_patches(image):
             images.append(image[r:r+PATCH_SIZE, c:c+PATCH_SIZE,:])
     return images
 
-def run_analysis():
+def run_analysis_with_patches():
     image = np.array(Image.open("analysis.png").convert("RGB"))
     images = split_into_patches(image)
     #print(images)
@@ -125,6 +131,7 @@ def run_analysis():
         image_processed = preprocess_classification(patch).unsqueeze(0).to(mps_device)
         outputs = classification_model(image_processed)
         _, predicted = torch.max(outputs, 1)
+        del image_processed
         #plt.imshow(patch)
         #print(predicted.item())
         if predicted.item() == 1:
@@ -132,9 +139,31 @@ def run_analysis():
             #plt.imshow(patch)
             image_processed = preprocess_segmentation(patch).unsqueeze(0).to(mps_device)
             mask, polygons = run_segmentation(image_processed, segmentation_model)
+            del image_processed
             det_polys.append(polygons)
     out = [poly for polylist in det_polys for poly in polylist]
+    del det_polys
     return out if len(out) > 0 else None
+
+def run_analysis():
+    image = np.array(Image.open("analysis.png").convert("RGB"))
+    #print(images)
+    image_processed = preprocess_classification(image).unsqueeze(0).to(mps_device)
+    outputs = classification_model(image_processed)
+    _, predicted = torch.max(outputs, 1)
+    del image_processed
+        #plt.imshow(patch)
+        #print(predicted.item())
+    if predicted.item() == 1:
+        print("Solar panel detected")
+        #plt.imshow(patch)
+        image_processed = preprocess_segmentation(image).unsqueeze(0).to(mps_device)
+        del image
+        mask, polygons = run_segmentation(image_processed, segmentation_model)
+        del image_processed
+        out = [poly for poly in polygons]
+        return out if len(out) > 0 else None
+    return None
 
 def run_segmentation(processed_image, model):
     outputs = model(processed_image)['out']
@@ -143,7 +172,7 @@ def run_segmentation(processed_image, model):
     thresh = 0.05
     mask[mask < thresh] = 0.0
     mask[mask > thresh] = 1.0
-    indices = np.where(mask == 1.0)
+    #indices = np.where(mask == 1.0)
     shapes = rasterio.features.shapes(mask.astype(np.int16), mask > 0)
     polygons = []
     for shape, val in shapes:
@@ -174,21 +203,23 @@ def main(selection):
         coords = selection["features"][i]["geometry"]["coordinates"][0]
         bbox = bbox_from_coords(coords)
         call_api(bbox)
+        print("Running Analysis Now...")
         polygons = run_analysis()
         if polygons is not None:
             top_left, bottom_right = extract_tl_br(bbox)
             for polygon in polygons:
-                coords = polygon.coords.xy
-                coords = np.dstack((coords[0], IMG_HEIGHT - np.array(coords[1]))).squeeze()
+                #coords = polygon.coords.xy
+                coords = np.dstack((polygon.coords.xy[0], IMG_HEIGHT - np.array(polygon.coords.xy[1]))).squeeze()
+                #print(coords)
                 lat_lon_coords = convert_to_lat_lon(top_left, bottom_right, IMG_HEIGHT, IMG_WIDTH, coords)
-                polygon_geom = Polygon(lat_lon_coords)
-                polygon_geoms.append(polygon_geom)
-    
+                polygon_geoms.append(Polygon(lat_lon_coords))
+        del polygons
+
     if polygon_geoms is not None:
         out_gdf = gpd.GeoDataFrame(geometry=polygon_geoms, crs="EPSG:4326")
-        
-    with open('panels.geojson' , 'w') as file:
-        file.write(out_gdf.to_json())
+    del polygon_geoms
+    #with open('panels.geojson' , 'w') as file:
+    #    file.write(out_gdf.to_json())
 
     return out_gdf.to_json()
 
